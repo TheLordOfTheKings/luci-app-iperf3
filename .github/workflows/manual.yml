@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   OPENWRT_VERSION: "25.12.6"
@@ -21,6 +21,30 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Read package metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PKG_VERSION="$(sed -n 's/^PKG_VERSION:=//p' Makefile | head -n 1)"
+          PKG_RELEASE="$(sed -n 's/^PKG_RELEASE:=//p' Makefile | head -n 1)"
+
+          test -n "$PKG_VERSION" || {
+            echo "PKG_VERSION not found in Makefile" >&2
+            exit 1
+          }
+
+          test -n "$PKG_RELEASE" || {
+            echo "PKG_RELEASE not found in Makefile" >&2
+            exit 1
+          }
+
+          echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
+          echo "PKG_RELEASE=$PKG_RELEASE" >> "$GITHUB_ENV"
+
+          echo "Package version: $PKG_VERSION"
+          echo "Package release: $PKG_RELEASE"
 
       - name: Install build dependencies
         run: |
@@ -60,7 +84,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          mkdir -p "sdk/$PKG_NAME"
           mkdir -p "sdk/package/$PKG_NAME"
+
           git archive HEAD | tar -xf - -C "sdk/package/$PKG_NAME"
 
           test -f "sdk/package/$PKG_NAME/Makefile" || {
@@ -150,3 +176,32 @@ jobs:
           path: ${{ env.PKG_PATH }}
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub release
+        if: success() && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          name: ${{ env.PKG_NAME }} ${{ env.PKG_VERSION }}-${{ env.PKG_RELEASE }} (OpenWrt ${{ env.OPENWRT_VERSION }})
+          tag_name: v${{ env.PKG_VERSION }}-r${{ env.PKG_RELEASE }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: ${{ env.PKG_PATH }}
+          body: |
+            OpenWrt ${{ env.OPENWRT_VERSION }} x86/64 APK build of `${{ env.PKG_NAME }}`.
+
+            **Package version:** `${{ env.PKG_VERSION }}-${{ env.PKG_RELEASE }}`
+
+            **Architecture:** `all`
+
+            **Runtime dependency:**
+            - `iperf3`
+
+            Install the APK using:
+            ```sh
+            apk add luci-app-iperf3
+            ```
