@@ -41,6 +41,8 @@ jobs:
         run: |
           set -euxo pipefail
           cd sdk
+          ./scripts/feeds update -a
+          ./scripts/feeds install luci
           ./scripts/feeds install -a
 
       - name: Install app source
@@ -49,15 +51,12 @@ jobs:
           set -euxo pipefail
           cd sdk
 
-          APP_DIR="feeds/luci/applications/luci-app-iperf3"
+          APP_DIR="package/feeds/luci/luci-app-iperf3"
+
           rm -rf "$APP_DIR"
           mkdir -p "$APP_DIR"
           git -C "$GITHUB_WORKSPACE" archive HEAD |
             tar -xf - -C "$APP_DIR"
-
-          mkdir -p package/feeds/luci
-          ln -sfn "../../../../feeds/luci/applications/luci-app-iperf3" \
-            package/feeds/luci/luci-app-iperf3
 
       - name: Configure and compile package
         shell: bash
@@ -75,6 +74,7 @@ jobs:
 
           if [[ -z "$PKG_PATH" || ! -f "$PKG_PATH" ]]; then
             echo "No luci-app-iperf3 APK was produced" >&2
+            find bin/packages -type f -name '*.apk' -print >&2
             exit 1
           fi
 
