@@ -142,6 +142,9 @@ jobs:
           grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' \
             "$APP_DIR/Makefile"
 
+          grep -Fq '# call BuildPackage - OpenWrt buildroot signature' \
+            "$APP_DIR/Makefile"
+
           # Register the package in the SDK package tree.
           mkdir -p package/feeds/luci
 
@@ -171,6 +174,10 @@ jobs:
           cd sdk
 
           make defconfig
+          if ! grep -Fq 'luci-app-iperf3' tmp/.packageinfo; then
+              echo "ERROR: OpenWrt did not register luci-app-iperf3"
+              exit 1
+          fi
 
       # --------------------------------------------------
       # 7. Compile APK
