@@ -44,9 +44,9 @@ jobs:
             ca-certificates
 
       # ------------------------------------------------
-      # 3. Prepare SDK and application source
+      # 3. Download and prepare SDK
       # ------------------------------------------------
-      - name: Prepare SDK and package source
+      - name: Prepare OpenWrt SDK
         shell: bash
         run: |
           set -euo pipefail
@@ -60,11 +60,8 @@ jobs:
 
           echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
 
-          echo "Package: $PKG_NAME"
-          echo "Version: $PKG_VERSION"
-          echo "OpenWrt: $OPENWRT_VERSION"
+          echo "Downloading OpenWrt $OPENWRT_VERSION SDK..."
 
-          # Download SDK
           curl --fail --location \
             --retry 5 \
             --retry-all-errors \
@@ -78,86 +75,144 @@ jobs:
             -C sdk \
             --strip-components=1
 
-          # Install application directly into the SDK package directory.
-          mkdir -p "sdk/package/$PKG_NAME"
-
-          git -C "$GITHUB_WORKSPACE" archive HEAD |
-            tar -xf - -C "sdk/package/$PKG_NAME"
-
-          # Verify source files.
-          test -f "sdk/package/$PKG_NAME/Makefile"
+          test -f sdk/Makefile
           test -f sdk/feeds.conf.default
 
-          # Verify LuCI Makefile configuration.
-          grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' \
-            "sdk/package/$PKG_NAME/Makefile"
-
-          # Required for OpenWrt's package scanner.
-          grep -Fq 'call BuildPackage' \
-            "sdk/package/$PKG_NAME/Makefile"
-
-          echo "Application source installed successfully."
-
       # ------------------------------------------------
-      # 4. Update and install OpenWrt feeds
+      # 4. Update and install feeds
       # ------------------------------------------------
       - name: Update SDK feeds
         shell: bash
         run: |
           set -euo pipefail
-
           cd sdk
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # Verify LuCI build infrastructure.
+          # Verify required LuCI infrastructure.
           test -f feeds/luci/luci.mk
 
-          echo "OpenWrt feeds installed successfully."
+          # Verify iperf3 package is available.
+          test -f package/feeds/packages/iperf3/Makefile
+
+          echo "All feeds installed successfully."
 
       # ------------------------------------------------
-      # 5. Configure and compile application
+      # 5. Install application source
       # ------------------------------------------------
-      - name: Configure and compile package
+      - name: Install application source
         shell: bash
         run: |
           set -euo pipefail
-
           cd sdk
 
-          # Configure SDK.
+          APP_DIR="package/$PKG_NAME"
+
+          mkdir -p "$APP_DIR"
+
+          git -C "$GITHUB_WORKSPACE" archive HEAD |
+            tar -xf - -C "$APP_DIR"
+
+          # Verify application source.
+          test -f "$APP_DIR/Makefile"
+          test -d "$APP_DIR/htdocs"
+
+          # Verify LuCI build infrastructure reference.
+          grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' \
+            "$APP_DIR/Makefile"
+
+          # Verify OpenWrt package scanner signature.
+          grep -Fq 'call BuildPackage' \
+            "$APP_DIR/Makefile"
+
+          echo "Application source installed:"
+          ls -la "$APP_DIR"
+
+      # ------------------------------------------------
+      # 6. Configure SDK
+      # ------------------------------------------------
+      - name: Configure OpenWrt SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd sdk
+
           make defconfig
 
-          # Workaround for optional LuCI minification packages.
+          # Disable broad buildbot package selections.
+          # These are unnecessary for this LuCI application.
+          for symbol in \
+            ALL_KMODS \
+            ALL_NONSHARED \
+            PACKAGE_nu801 \
+            LUCI_JSMIN \
+            LUCI_CSSTIDY \
+            LUCI_SRCDIET
+          do
+            sed -i \
+              "/^CONFIG_${symbol}=/d; /^# CONFIG_${symbol} is not set$/d" \
+              .config
+
+            printf '# CONFIG_%s is not set\n' "$symbol" >> .config
+          done
+
+          # Apply configuration changes.
+          make defconfig
+
+          echo "Checking unnecessary package selections..."
+
+          if grep -Eq \
+            '^CONFIG_(ALL_KMODS|ALL_NONSHARED|PACKAGE_nu801)=[ym]' \
+            .config; then
+            echo "ERROR: Unnecessary package selections remain enabled."
+            exit 1
+          fi
+
+          # Remove optional LuCI minification dependencies.
           rm -rf feeds/luci/contrib/package/csstidy
 
           sed -i '/^CONFIG_LUCI_JSMIN=/d' .config
           sed -i '/^CONFIG_LUCI_CSSTIDY=/d' .config
 
-          # Verify that OpenWrt discovered our application.
+          # Re-apply configuration after removing optional packages.
+          make defconfig
+
+          echo "SDK configuration completed."
+
+      # ------------------------------------------------
+      # 7. Compile application
+      # ------------------------------------------------
+      - name: Compile luci-app-iperf3
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd sdk
+
+          # Verify package registration.
           if ! grep -Fq 'luci-app-iperf3' tmp/.packageinfo; then
-            echo "ERROR: luci-app-iperf3 was not registered by OpenWrt." >&2
-            echo "Check the BuildPackage signature in its Makefile." >&2
+            echo "ERROR: luci-app-iperf3 was not registered."
             exit 1
           fi
 
-          # Clean previous package build.
-          make "package/${PKG_NAME}/clean"
+          echo "Package registered successfully."
+
+          # Clean package.
+          make package/luci-app-iperf3/clean
 
           # Compile package.
           make -j"$(nproc)" V=s \
-            "package/${PKG_NAME}/compile"
+            package/luci-app-iperf3/compile
 
-          # Locate the generated APK.
+          # Find generated APK.
           PKG_PATH="$(
             find bin/packages -type f \
-              -name "${PKG_NAME}-*.apk" \
+              -name 'luci-app-iperf3-*.apk' \
               -print -quit
           )"
 
           if [[ -z "$PKG_PATH" || ! -f "$PKG_PATH" ]]; then
-            echo "ERROR: ${PKG_NAME} APK was not generated." >&2
+            echo "ERROR: luci-app-iperf3 APK was not generated."
 
             echo "Available APK files:"
             find bin/packages -type f -name '*.apk' -print
@@ -168,12 +223,11 @@ jobs:
           echo "Successfully built:"
           ls -lh "$PKG_PATH"
 
-          # Export absolute package path.
           echo "PKG_PATH=$GITHUB_WORKSPACE/sdk/$PKG_PATH" \
             >> "$GITHUB_ENV"
 
       # ------------------------------------------------
-      # 6. Upload APK artifact
+      # 8. Upload APK artifact
       # ------------------------------------------------
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
