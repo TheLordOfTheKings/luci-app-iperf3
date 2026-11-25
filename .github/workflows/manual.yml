@@ -12,12 +12,15 @@ env:
 
 jobs:
   build:
-    name: Build OpenWrt 25.12.5 APK
+    name: Build OpenWrt ${{ env.OPENWRT_VERSION }} APK
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Install build dependencies
         run: |
@@ -38,20 +41,15 @@ jobs:
           mkdir -p sdk
           tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
 
-      - name: Initialize and pin SDK feeds
+      - name: Initialize OpenWrt feeds
         shell: bash
         run: |
           set -euxo pipefail
           cd sdk
 
-          # Restore the SDK's feeds configuration before updating.
           cp feeds.conf.default feeds.conf
-
           ./scripts/feeds update -a
-          ./scripts/feeds install luci
-          ./scripts/feeds install luci-base
-          ./scripts/feeds install luci-compat
-          ./scripts/feeds install iperf3
+          ./scripts/feeds install -a
 
       - name: Install app source
         shell: bash
@@ -59,17 +57,34 @@ jobs:
           set -euxo pipefail
           cd sdk
 
-          APP_DIR="package/feeds/luci/luci-app-iperf3"
+          # Find where this SDK installed the LuCI feed.
+          LUCI_MK="$(
+            find feeds package -type f -name luci.mk \
+              -print -quit 2>/dev/null
+          )"
 
-          rm -rf "$APP_DIR"
+          if [[ -z "$LUCI_MK" ]]; then
+            echo "Unable to locate luci.mk after updating feeds" >&2
+            find feeds -maxdepth 3 -type f -name '*.mk' -print >&2
+            exit 1
+          fi
+
+          LUCI_FEED_DIR="$(dirname "$(dirname "$LUCI_MK")")"
+          APP_DIR="$LUCI_FEED_DIR/applications/luci-app-iperf3"
+
           mkdir -p "$APP_DIR"
 
           git -C "$GITHUB_WORKSPACE" archive HEAD |
             tar -xf - -C "$APP_DIR"
 
           test -f "$APP_DIR/Makefile"
-          test -f "package/feeds/luci/luci.mk"
-          test -f "package/feeds/luci/luci-app-iperf3/Makefile"
+          test -f "$LUCI_MK"
+
+          echo "LUCI_MK=$LUCI_MK" >> "$GITHUB_ENV"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+          echo "LuCI makefile: $LUCI_MK"
+          echo "App directory: $APP_DIR"
 
       - name: Configure and compile package
         shell: bash
@@ -79,10 +94,9 @@ jobs:
 
           make defconfig
 
-          make \
+          make -j"$(nproc)" V=s \
             "package/feeds/luci/luci-app-iperf3/clean" \
-            "package/feeds/luci/luci-app-iperf3/compile" \
-            -j"$(nproc)" V=s
+            "package/feeds/luci/luci-app-iperf3/compile"
 
           PKG_PATH="$(
             find bin/packages -type f \
