@@ -57,20 +57,7 @@ jobs:
           set -euxo pipefail
           cd sdk
 
-          # Find where this SDK installed the LuCI feed.
-          LUCI_MK="$(
-            find feeds package -type f -name luci.mk \
-              -print -quit 2>/dev/null
-          )"
-
-          if [[ -z "$LUCI_MK" ]]; then
-            echo "Unable to locate luci.mk after updating feeds" >&2
-            find feeds -maxdepth 3 -type f -name '*.mk' -print >&2
-            exit 1
-          fi
-
-          LUCI_FEED_DIR="$(dirname "$(dirname "$LUCI_MK")")"
-          APP_DIR="$LUCI_FEED_DIR/applications/luci-app-iperf3"
+          APP_DIR="package/feeds/luci/luci-app-iperf3"
 
           mkdir -p "$APP_DIR"
 
@@ -78,12 +65,7 @@ jobs:
             tar -xf - -C "$APP_DIR"
 
           test -f "$APP_DIR/Makefile"
-          test -f "$LUCI_MK"
 
-          echo "LUCI_MK=$LUCI_MK" >> "$GITHUB_ENV"
-          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
-
-          echo "LuCI makefile: $LUCI_MK"
           echo "App directory: $APP_DIR"
 
       - name: Configure and compile package
@@ -94,9 +76,10 @@ jobs:
 
           make defconfig
 
+          make V=s package/feeds/luci/luci-app-iperf3/clean
+
           make -j"$(nproc)" V=s \
-            "package/feeds/luci/luci-app-iperf3/clean" \
-            "package/feeds/luci/luci-app-iperf3/compile"
+            package/feeds/luci/luci-app-iperf3/compile
 
           PKG_PATH="$(
             find bin/packages -type f \
@@ -112,7 +95,7 @@ jobs:
 
           echo "PKG_PATH=$GITHUB_WORKSPACE/sdk/$PKG_PATH" >> "$GITHUB_ENV"
           echo "Built package: $PKG_PATH"
-
+      
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
