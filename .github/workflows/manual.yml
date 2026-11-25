@@ -8,65 +8,63 @@ permissions:
   contents: read
 
 env:
-  OPENWRT_VERSION: "25.12.5"
-  SDK_URL: "https://downloads.openwrt.org/releases/25.12.5/targets/x86/64/openwrt-sdk-25.12.5-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+  OPENWRT_VERSION: "25.12.6"
+  PKG_NAME: "luci-app-iperf3"
+  SDK_URL: "https://downloads.openwrt.org/releases/25.12.6/targets/x86/64/openwrt-sdk-25.12.6-x86-64_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
 
 jobs:
   build:
-    name: Build OpenWrt 25.12.5 APK (x86-64)
-    runs-on: ubuntu-24.04
+    name: Build OpenWrt 25.12.6 APK
+    runs-on: ubuntu-latest
     timeout-minutes: 60
 
     steps:
-      # --------------------------------------------------
-      # 1. Checkout application source
-      # --------------------------------------------------
+      # ------------------------------------------------
+      # 1. Checkout repository
+      # ------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      # --------------------------------------------------
+      # ------------------------------------------------
       # 2. Install build dependencies
-      # --------------------------------------------------
+      # ------------------------------------------------
       - name: Install build dependencies
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
           sudo apt-get update
 
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            build-essential \
-            clang \
-            flex \
-            bison \
-            g++ \
-            gawk \
-            gettext \
-            git \
-            libncurses-dev \
-            libssl-dev \
-            python3 \
-            python3-setuptools \
-            rsync \
-            swig \
-            unzip \
-            wget \
-            curl \
-            zlib1g-dev \
-            file \
-            zstd \
+            build-essential clang flex bison g++ gawk gettext git \
+            libncurses-dev libssl-dev python3 python3-setuptools \
+            rsync swig unzip zlib1g-dev file wget curl zstd \
             ca-certificates
 
-      # --------------------------------------------------
-      # 3. Download OpenWrt SDK
-      # --------------------------------------------------
-      - name: Download and prepare OpenWrt SDK
+      # ------------------------------------------------
+      # 3. Prepare SDK and application source
+      # ------------------------------------------------
+      - name: Prepare SDK and package source
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
+          PKG_VERSION="$(sed -n 's/^PKG_VERSION:=//p' Makefile | head -n 1)"
+
+          if [[ -z "$PKG_VERSION" ]]; then
+            echo "ERROR: PKG_VERSION not found in Makefile" >&2
+            exit 1
+          fi
+
+          echo "PKG_VERSION=$PKG_VERSION" >> "$GITHUB_ENV"
+
+          echo "Package: $PKG_NAME"
+          echo "Version: $PKG_VERSION"
+          echo "OpenWrt: $OPENWRT_VERSION"
+
+          # Download SDK
           curl --fail --location \
             --retry 5 \
             --retry-all-errors \
@@ -80,127 +78,86 @@ jobs:
             -C sdk \
             --strip-components=1
 
-          test -f sdk/feeds.conf.default
-          test -f sdk/Makefile
-
-      # --------------------------------------------------
-      # 4. Configure release-matched feeds
-      # --------------------------------------------------
-      - name: Initialize OpenWrt feeds
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd sdk
-
-          # Pin feeds to the exact OpenWrt 25.12.5 revisions.
-          cat > feeds.conf <<'EOF'
-          src-git packages https://git.openwrt.org/feed/packages.git^5caa62e0bc9f7fb9b0c12a23267bceb7724214dd
-          src-git luci https://git.openwrt.org/project/luci.git^128a7812f4be233c5dd7f7466f534fd888785caf
-          EOF
-
-          # Update only the required feeds.
-          ./scripts/feeds update packages luci
-
-          # Install LuCI base and iperf3.
-          # OpenWrt recursively installs their build dependencies.
-          ./scripts/feeds install -p luci luci-base
-          ./scripts/feeds install -p packages iperf3
-
-          # Verify required feed files.
-          test -f feeds/luci/luci.mk
-
-          echo "Installed feed packages:"
-          ls -la package/feeds/luci/
-          ls -la package/feeds/packages/
-
-      # --------------------------------------------------
-      # 5. Install application source into LuCI feed
-      # --------------------------------------------------
-      - name: Install luci-app-iperf3 source
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd sdk
-
-          APP_DIR="feeds/luci/applications/luci-app-iperf3"
-          APP_LINK="package/feeds/luci/luci-app-iperf3"
-
-          # Install repository source in the standard LuCI location.
-          mkdir -p "$APP_DIR"
+          # Install application directly into the SDK package directory.
+          mkdir -p "sdk/package/$PKG_NAME"
 
           git -C "$GITHUB_WORKSPACE" archive HEAD |
-            tar -xf - -C "$APP_DIR"
+            tar -xf - -C "sdk/package/$PKG_NAME"
 
-          # Verify application files.
-          test -f "$APP_DIR/Makefile"
-          test -d "$APP_DIR/htdocs"
+          # Verify source files.
+          test -f "sdk/package/$PKG_NAME/Makefile"
+          test -f sdk/feeds.conf.default
+
+          # Verify LuCI Makefile configuration.
+          grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' \
+            "sdk/package/$PKG_NAME/Makefile"
+
+          # Required for OpenWrt's package scanner.
+          grep -Fq 'call BuildPackage' \
+            "sdk/package/$PKG_NAME/Makefile"
+
+          echo "Application source installed successfully."
+
+      # ------------------------------------------------
+      # 4. Update and install OpenWrt feeds
+      # ------------------------------------------------
+      - name: Update SDK feeds
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd sdk
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          # Verify LuCI build infrastructure.
           test -f feeds/luci/luci.mk
 
-          # The repository Makefile must include the feed's luci.mk.
-          grep -Fq 'include $(TOPDIR)/feeds/luci/luci.mk' \
-            "$APP_DIR/Makefile"
+          echo "OpenWrt feeds installed successfully."
 
-          grep -Fq '# call BuildPackage - OpenWrt buildroot signature' \
-            "$APP_DIR/Makefile"
-
-          # Register the package in the SDK package tree.
-          mkdir -p package/feeds/luci
-
-          rm -rf "$APP_LINK"
-
-          ln -s \
-            ../../../feeds/luci/applications/luci-app-iperf3 \
-            "$APP_LINK"
-
-          # Verify the symlink resolves correctly.
-          test -f "$APP_LINK/Makefile"
-
-          echo "Application source:"
-          readlink -f "$APP_LINK"
-
-          echo "Application Makefile:"
-          cat "$APP_LINK/Makefile"
-
-      # --------------------------------------------------
-      # 6. Configure SDK
-      # --------------------------------------------------
-      - name: Configure OpenWrt
+      # ------------------------------------------------
+      # 5. Configure and compile application
+      # ------------------------------------------------
+      - name: Configure and compile package
         shell: bash
         run: |
-          set -euxo pipefail
+          set -euo pipefail
 
           cd sdk
 
+          # Configure SDK.
           make defconfig
+
+          # Workaround for optional LuCI minification packages.
+          rm -rf feeds/luci/contrib/package/csstidy
+
+          sed -i '/^CONFIG_LUCI_JSMIN=/d' .config
+          sed -i '/^CONFIG_LUCI_CSSTIDY=/d' .config
+
+          # Verify that OpenWrt discovered our application.
           if ! grep -Fq 'luci-app-iperf3' tmp/.packageinfo; then
-              echo "ERROR: OpenWrt did not register luci-app-iperf3"
-              exit 1
+            echo "ERROR: luci-app-iperf3 was not registered by OpenWrt." >&2
+            echo "Check the BuildPackage signature in its Makefile." >&2
+            exit 1
           fi
 
-      # --------------------------------------------------
-      # 7. Compile APK
-      # --------------------------------------------------
-      - name: Compile luci-app-iperf3
-        shell: bash
-        run: |
-          set -euxo pipefail
+          # Clean previous package build.
+          make "package/${PKG_NAME}/clean"
 
-          cd sdk
-
+          # Compile package.
           make -j"$(nproc)" V=s \
-            package/feeds/luci/luci-app-iperf3/compile
+            "package/${PKG_NAME}/compile"
 
-          # Locate generated APK.
+          # Locate the generated APK.
           PKG_PATH="$(
             find bin/packages -type f \
-              -name 'luci-app-iperf3-*.apk' \
+              -name "${PKG_NAME}-*.apk" \
               -print -quit
           )"
 
           if [[ -z "$PKG_PATH" || ! -f "$PKG_PATH" ]]; then
-            echo "ERROR: luci-app-iperf3 APK was not generated." >&2
+            echo "ERROR: ${PKG_NAME} APK was not generated." >&2
 
             echo "Available APK files:"
             find bin/packages -type f -name '*.apk' -print
@@ -208,17 +165,16 @@ jobs:
             exit 1
           fi
 
-          # Check generated package.
           echo "Successfully built:"
           ls -lh "$PKG_PATH"
 
-          # Export absolute path for artifact upload.
+          # Export absolute package path.
           echo "PKG_PATH=$GITHUB_WORKSPACE/sdk/$PKG_PATH" \
             >> "$GITHUB_ENV"
 
-      # --------------------------------------------------
-      # 8. Upload APK
-      # --------------------------------------------------
+      # ------------------------------------------------
+      # 6. Upload APK artifact
+      # ------------------------------------------------
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
