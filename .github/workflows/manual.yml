@@ -31,19 +31,27 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+
           curl --fail --location --retry 5 --retry-all-errors \
             --retry-delay 5 "$SDK_URL" --output sdk.tar.zst
+
           mkdir -p sdk
           tar --zstd -xf sdk.tar.zst -C sdk --strip-components=1
 
-      - name: Initialize pinned SDK feeds
+      - name: Initialize and pin SDK feeds
         shell: bash
         run: |
           set -euxo pipefail
           cd sdk
+
+          # Restore the SDK's feeds configuration before updating.
+          cp feeds.conf.default feeds.conf
+
           ./scripts/feeds update -a
           ./scripts/feeds install luci
-          ./scripts/feeds install -a
+          ./scripts/feeds install luci-base
+          ./scripts/feeds install luci-compat
+          ./scripts/feeds install iperf3
 
       - name: Install app source
         shell: bash
@@ -55,8 +63,13 @@ jobs:
 
           rm -rf "$APP_DIR"
           mkdir -p "$APP_DIR"
+
           git -C "$GITHUB_WORKSPACE" archive HEAD |
             tar -xf - -C "$APP_DIR"
+
+          test -f "$APP_DIR/Makefile"
+          test -f "package/feeds/luci/luci.mk"
+          test -f "package/feeds/luci/luci-app-iperf3/Makefile"
 
       - name: Configure and compile package
         shell: bash
@@ -65,12 +78,17 @@ jobs:
           cd sdk
 
           make defconfig
-          make "package/feeds/luci/luci-app-iperf3/clean" \
+
+          make \
+            "package/feeds/luci/luci-app-iperf3/clean" \
             "package/feeds/luci/luci-app-iperf3/compile" \
             -j"$(nproc)" V=s
 
-          PKG_PATH="$(find bin/packages -type f \
-            -name 'luci-app-iperf3*.apk' -print -quit)"
+          PKG_PATH="$(
+            find bin/packages -type f \
+              -name 'luci-app-iperf3*.apk' \
+              -print -quit
+          )"
 
           if [[ -z "$PKG_PATH" || ! -f "$PKG_PATH" ]]; then
             echo "No luci-app-iperf3 APK was produced" >&2
